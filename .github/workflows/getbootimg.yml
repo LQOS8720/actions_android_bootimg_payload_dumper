@@ -32,29 +32,25 @@ jobs:
           docker images -q | xargs -r docker rmi || echo "No Docker images to remove."
 
       - name: Create working directory
-        run: |
-          mkdir -p "$HOME/work"
+        run: mkdir -p "$HOME/work"
 
       - name: Download payload-dumper-go
         run: |
           cd "$HOME/work"
           wget -O payload_dumper_go.tar.gz "$Payload_Dumper_Go_Url"
 
-      - name: Extract payload-dumper-go
+      - name: Extract payload-dumper-go (no strip-components!)
         run: |
           cd "$HOME/work"
-          # List contents first to inspect structure (for debugging)
-          tar -tzf payload_dumper_go.tar.gz
-          # Extract and flatten top-level dir if needed
           mkdir -p payload_dumper_go
-          tar -xzf payload_dumper_go.tar.gz -C payload_dumper_go --strip-components=1
+          tar -xzf payload_dumper_go.tar.gz -C payload_dumper_go
+          ls -l payload_dumper_go/  # Debug: show extracted file
 
       - name: Verify and make executable
         run: |
           cd "$HOME/work"
           if [ ! -f payload_dumper_go/payload-dumper-go ]; then
             echo "❌ ERROR: payload-dumper-go not found after extraction!"
-            ls -R payload_dumper_go/
             exit 1
           fi
           chmod +x payload_dumper_go/payload-dumper-go
@@ -65,19 +61,24 @@ jobs:
           cd "$HOME/work"
           wget -O rom.zip "${{ github.event.inputs.ROM_URL }}"
 
-      - name: Extract ROM to find payload.bin
+      - name: Extract ROM and locate payload.bin
         run: |
           cd "$HOME/work"
           mkdir -p rom_extracted
           unzip -q rom.zip -d rom_extracted
-          # Search for payload.bin anywhere in the extracted ZIP
+          # Find and copy payload.bin to payload_dumper_go/
           find rom_extracted -type f -name "payload.bin" -exec cp {} payload_dumper_go/ \;
           if [ ! -f payload_dumper_go/payload.bin ]; then
-            echo "❌ ERROR: payload.bin not found in ROM!"
-            find rom_extracted -type f | head -n 20
+            echo "❌ ERROR: payload.bin not found in the ROM!"
+            find rom_extracted -type f | head -n 30
             exit 1
           fi
           echo "✅ payload.bin found and copied."
+
+      - name: List partitions in payload.bin (debug)
+        run: |
+          cd "$HOME/work/payload_dumper_go"
+          ./payload-dumper-go -l payload.bin
 
       - name: Extract specified partitions
         run: |
@@ -87,7 +88,7 @@ jobs:
       - name: List extracted images
         run: |
           cd "$HOME/work/payload_dumper_go"
-          ls -lh *.img || echo "⚠️ No .img files extracted."
+          ls -lh *.img || echo "⚠️ No .img files were extracted."
 
       - name: Upload Artifact to GitHub
         if: ${{ github.event.inputs.UPLOAD_CONFIG == 'true' }}
@@ -96,18 +97,18 @@ jobs:
           name: Extracted-Images
           path: ${{ runner.home }}/work/payload_dumper_go/*.img
 
-      - name: Upload via WeTransfer
+      - name: Upload via transfer.sh (reliable alternative to WeTransfer)
         if: ${{ github.event.inputs.UPLOAD_CONFIG == 'false' }}
         run: |
           cd "$HOME/work"
-          # Install file-transfer tool
-          curl -sL https://git.io/file-transfer | sh
-          # Enable nullglob to handle no-match safely
           shopt -s nullglob
           img_files=(payload_dumper_go/*.img)
           if [ ${#img_files[@]} -eq 0 ]; then
-            echo "❌ No .img files to upload!"
+            echo "❌ No .img files to upload."
             exit 1
           fi
-          echo "📤 Uploading ${#img_files[@]} image(s) via WeTransfer..."
-          ./transfer wet "${img_files[@]}"
+          echo "📤 Uploading extracted image(s) to transfer.sh..."
+          for f in "${img_files[@]}"; do
+            url=$(curl --upload-file "$f" "https://transfer.sh/$(basename "$f")")
+            echo "🔗 $(basename "$f"): $url"
+          done
