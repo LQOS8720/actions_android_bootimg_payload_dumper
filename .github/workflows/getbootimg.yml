@@ -2,77 +2,75 @@ name: get_images_from_payload.bin
 
 on:
   workflow_dispatch:
-      inputs:
-        UPLOAD_CONFIG:
-          description: 'Upload Artifacts to Actions'
-          required: true
-          default: "false"
-          type: boolean
-        ROM_URL:
-          description: 'ROM directly link'
-          required: true
-          default: "https://ultimateota.d.miui.com/OS2.0.206.0.VLFCNXM/diting-ota_full-OS2.0.206.0.VLFCNXM-user-15.0-ffb9d90a59.zip?t=1764465831&s=6cb61215b740756331758beb4f6a5b3a"
-          type: string
-        PARTITIONS:
-          description: 'Partitions which you need to extract(Such as boot,vendor_dlkm,...,vendor_boot)'
-          required: true
-          default: "boot"
-          type: string
-        
-    
+    inputs:
+      UPLOAD_CONFIG:
+        description: 'Upload Artifacts to Actions'
+        required: true
+        default: "false"
+        type: boolean
+      ROM_URL:
+        description: 'ROM directly link'
+        required: true
+        default: "https://ultimateota.d.miui.com/OS2.0.206.0.VLFCNXM/diting-ota_full-OS2.0.206.0.VLFCNXM-user-15.0-ffb9d90a59.zip?t=1764465831&s=6cb61215b740756331758beb4f6a5b3a"
+        type: string
+      PARTITIONS:
+        description: 'Partitions to extract (e.g., boot,vendor_dlkm)'
+        required: true
+        default: "boot"
+        type: string
+
 env:
   TZ: Asia/Shanghai
-  Payload_Dumper_Go_Url: https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
+  PAYLOAD_DUMPER_URL: https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
 
 jobs:
   make:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read  # 最小权限原则
+      packages: write
 
     steps:
-
     - name: Clean Up Disk Space
       run: |
-        docker rmi `docker images -q`
-        sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /etc/apt/sources.list.d
-        sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* powershell openjdk* mysql* php*
-        sudo -E apt-get -y autoremove --purge
-        sudo -E apt-get clean 
-        
-    - name: Clone the tools source code
+        docker rmi $(docker images -q) 2>/dev/null || true
+        sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /opt/ghc
+        sudo apt-get clean && sudo apt-get autoremove -y
+
+    - name: Setup Payload Dumper
       run: |
-       cd ~
-       mkdir -p ~/payload_dumper_go
-       wget -O payload_dumper_go.tar.gz $Payload_Dumper_Go_Url
-       tar -C ~/payload_dumper_go/ -zxvf payload_dumper_go.tar.gz
-       
-  
-    - name: Download the ROM
+        mkdir -p ~/payload_dumper_go
+        wget -O payload_dumper_go.tar.gz $PAYLOAD_DUMPER_URL
+        tar -C ~/payload_dumper_go/ -zxvf payload_dumper_go.tar.gz
+        chmod +x ~/payload_dumper_go/payload-dumper-go
+
+    - name: Download ROM
       run: |
-       cd ~
-       wget -O rom.zip ${{ github.event.inputs.ROM_URL }}
-   
-    - name: unzip the ROM
+        wget -O ~/rom.zip ${{ github.event.inputs.ROM_URL }}
+
+    - name: Extract ROM
       run: |
-       cd ~
-       unzip rom.zip -d payload_dumper_go
-    
-    - name: extract the payload.bin
+        unzip ~/rom.zip -d ~/payload_dumper_go/
+        # 验证 payload.bin 存在性
+        test -f ~/payload_dumper_go/payload.bin || (echo "payload.bin not found!" && exit 1)
+
+    - name: Extract Partitions
       run: |
-       cd ~
-       cd payload_dumper_go
-       ./payload-dumper-go -o ~/payload_dumper_go -p ${{ github.event.inputs.PARTITIONS }} payload.bin
-   
+        ~/payload_dumper_go/payload-dumper-go \
+          -o ~/payload_dumper_go \
+          -p ${{ github.event.inputs.PARTITIONS }} \
+          ~/payload_dumper_go/payload.bin
+
     - name: Upload Artifact
       if: github.event.inputs.UPLOAD_CONFIG == 'true'
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4  # 关键升级到 v4
       with:
         name: Image-files
-        path: |
-          ~/payload_dumper_go/*.img
-          
-    - name: Upload images to WeTransfer
+        path: ~/payload_dumper_go/*.img
+        retention-days: 3  # 避免存储溢出
+
+    - name: Upload to WeTransfer
       if: github.event.inputs.UPLOAD_CONFIG == 'false'
       run: |
-        cd ~
         curl -sL https://git.io/file-transfer | sh
         ./transfer wet ~/payload_dumper_go/*.img
