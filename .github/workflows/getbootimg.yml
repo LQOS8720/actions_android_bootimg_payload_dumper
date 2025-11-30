@@ -30,12 +30,15 @@ jobs:
 
     steps:
 
- - name: Clean Up Disk Space
-  run: |
-    IMAGES=$(docker images -q)
-    if [ -n "$IMAGES" ]; then
-      docker rmi $IMAGES
-    fi
+      - name: Clean Up Disk Space
+        run: |
+          IMAGES=$(docker images -q)
+          if [ -n "$IMAGES" ]; then
+            echo "Removing Docker images: $IMAGES"
+            docker rmi $IMAGES
+          else
+            echo "No Docker images found."
+          fi
         
     - name: Clone the tools source code
       run: |
