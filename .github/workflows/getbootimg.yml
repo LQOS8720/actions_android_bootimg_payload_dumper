@@ -9,7 +9,7 @@ on:
         default: "false"
         type: boolean
       ROM_URL:
-        description: 'ROM direct link'
+        description: 'ROM direct link (must contain payload.bin)'
         required: true
         default: "https://ultimateota.d.miui.com/OS2.0.206.0.VLFCNXM/diting-ota_full-OS2.0.206.0.VLFCNXM-user-15.0-ffb9d90a59.zip?t=1764465831&s=6cb61215b740756331758beb4f6a5b3a"
         type: string
@@ -29,55 +29,85 @@ jobs:
     steps:
       - name: Clean Up Disk Space
         run: |
-          docker images -q | xargs -r docker rmi
+          docker images -q | xargs -r docker rmi || echo "No Docker images to remove."
 
-      - name: Setup workspace
+      - name: Create working directory
         run: |
-          mkdir -p "$HOME/payload_dumper_go"
+          mkdir -p "$HOME/work"
 
-      - name: Download and extract payload-dumper-go
+      - name: Download payload-dumper-go
         run: |
-          cd "$HOME"
+          cd "$HOME/work"
           wget -O payload_dumper_go.tar.gz "$Payload_Dumper_Go_Url"
-          tar -zxvf payload_dumper_go.tar.gz -C payload_dumper_go --strip-components=1
+
+      - name: Extract payload-dumper-go
+        run: |
+          cd "$HOME/work"
+          # List contents first to inspect structure (for debugging)
+          tar -tzf payload_dumper_go.tar.gz
+          # Extract and flatten top-level dir if needed
+          mkdir -p payload_dumper_go
+          tar -xzf payload_dumper_go.tar.gz -C payload_dumper_go --strip-components=1
+
+      - name: Verify and make executable
+        run: |
+          cd "$HOME/work"
+          if [ ! -f payload_dumper_go/payload-dumper-go ]; then
+            echo "❌ ERROR: payload-dumper-go not found after extraction!"
+            ls -R payload_dumper_go/
+            exit 1
+          fi
           chmod +x payload_dumper_go/payload-dumper-go
+          echo "✅ payload-dumper-go is ready."
 
       - name: Download ROM
         run: |
-          cd "$HOME"
+          cd "$HOME/work"
           wget -O rom.zip "${{ github.event.inputs.ROM_URL }}"
 
-      - name: Extract ROM
+      - name: Extract ROM to find payload.bin
         run: |
-          cd "$HOME"
+          cd "$HOME/work"
+          mkdir -p rom_extracted
           unzip -q rom.zip -d rom_extracted
-          # Find payload.bin wherever it is
-          find rom_extracted -name "payload.bin" -exec cp {} payload_dumper_go/ \;
+          # Search for payload.bin anywhere in the extracted ZIP
+          find rom_extracted -type f -name "payload.bin" -exec cp {} payload_dumper_go/ \;
+          if [ ! -f payload_dumper_go/payload.bin ]; then
+            echo "❌ ERROR: payload.bin not found in ROM!"
+            find rom_extracted -type f | head -n 20
+            exit 1
+          fi
+          echo "✅ payload.bin found and copied."
 
-      - name: Extract partitions
+      - name: Extract specified partitions
         run: |
-          cd "$HOME/payload_dumper_go"
-          ./payload-dumper-go -o "$HOME/payload_dumper_go" -p "${{ github.event.inputs.PARTITIONS }}" payload.bin
+          cd "$HOME/work/payload_dumper_go"
+          ./payload-dumper-go -o "$HOME/work/payload_dumper_go" -p "${{ github.event.inputs.PARTITIONS }}" payload.bin
 
       - name: List extracted images
-        run: ls -lh "$HOME/payload_dumper_go"/*.img
+        run: |
+          cd "$HOME/work/payload_dumper_go"
+          ls -lh *.img || echo "⚠️ No .img files extracted."
 
-      - name: Upload Artifact (GitHub)
+      - name: Upload Artifact to GitHub
         if: ${{ github.event.inputs.UPLOAD_CONFIG == 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: Image-files
-          path: ${{ runner.home }}/payload_dumper_go/*.img
+          name: Extracted-Images
+          path: ${{ runner.home }}/work/payload_dumper_go/*.img
 
       - name: Upload via WeTransfer
         if: ${{ github.event.inputs.UPLOAD_CONFIG == 'false' }}
         run: |
-          cd "$HOME"
+          cd "$HOME/work"
+          # Install file-transfer tool
           curl -sL https://git.io/file-transfer | sh
+          # Enable nullglob to handle no-match safely
           shopt -s nullglob
-          files=("$HOME/payload_dumper_go"/*.img)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "❌ No .img files extracted!"
+          img_files=(payload_dumper_go/*.img)
+          if [ ${#img_files[@]} -eq 0 ]; then
+            echo "❌ No .img files to upload!"
             exit 1
           fi
-          ./transfer wet "${files[@]}"
+          echo "📤 Uploading ${#img_files[@]} image(s) via WeTransfer..."
+          ./transfer wet "${img_files[@]}"
