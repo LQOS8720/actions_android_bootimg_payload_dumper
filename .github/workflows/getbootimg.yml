@@ -1,76 +1,67 @@
-name: get_images_from_payload.bin
+name: get_bootimg_from_payload.bin
+姓名: name: get_bootimg_from_payload.bin:从Payload.bin获取启动图像
 
 on:
-  workflow_dispatch:
-    inputs:
-      UPLOAD_CONFIG:
-        description: 'Upload Artifacts to Actions'
-        required: true
-        default: "false"
-        type: boolean
-      ROM_URL:
-        description: 'ROM directly link'
-        required: true
-        default: "https://ultimateota.d.miui.com/OS2.0.206.0.VLFCNXM/diting-ota_full-OS2.0.206.0.VLFCNXM-user-15.0-ffb9d90a59.zip?t=1764465831&s=6cb61215b740756331758beb4f6a5b3a"
-        type: string
-      PARTITIONS:
-        description: 'Partitions to extract (e.g., boot,vendor_dlkm)'
-        required: true
-        default: "boot"
-        type: string
+  watch:
+    types: [started]
+在:
+看:
+类型: [类型:[已开始]]
 
 env:
+  ROM_URL: https://hugeota.d.miui.com/21.3.31/miui_ALIOTH_21.3.31_25fc8f0d66_11.0.zip
   TZ: Asia/Shanghai
-  PAYLOAD_DUMPER_URL: https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
+  ROM_URL: ROM_URL:https://pan.baidu.com/s/1JtK0Uz_AFZwT-rGvnHo-LQ?pwd=772c
+  TZ: TZ:亚洲/上海
 
 jobs:
   make:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read  # 最小权限原则
-      packages: write
+工作:
+制作:
+运行中: 运行在:Ubuntu-最新
 
     steps:
+步骤:
+
+    - name: install Python 3.7
+      uses: actions/setup-python@v1
+      with:
+          python-version: 3.7
+    - name: Initialization environment 
+      run: |
+        cd ~
+        pip install bsdiff4
+        python -m pip install protobuf
+    - 姓名: -名称:安装Python3.7
+用途: 用途:actions/setup-python@v1
+和:
+Python版本: 3.7
+    - 姓名: -名称:初始化环境
+运行: |
+cd ~
+pip install bsdiff4
+python -m pip install protobuf
+
     - name: Clean Up Disk Space
       run: |
-        docker rmi $(docker images -q) 2>/dev/null || true
-        sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /opt/ghc
-        sudo apt-get clean && sudo apt-get autoremove -y
+        docker rmi `docker images -q`
+        sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /etc/apt/sources.list.d
+        sudo -E apt-get -y purge azure-cli ghc* zulu* hhvm llvm* firefox google* dotnet* powershell openjdk* mysql* php*
+        sudo -E apt-get -y autoremove --purge
+        sudo -E apt-get clean 
+    - 姓名: -名称:清理磁盘空间
+运行: |
+docker rmi `docker images -q'
+sudo rm -rf /usr/share/dotnet/etc/mysql/etc/php/etc/apt/sources.list.d
+sudo -E apt-get -y purge Azure-cli ghc* zulu* hhvm llvm* firefox Google* dotnet* powershell openjdk* mysql* php*
+sudo -E apt-get -y autoremove --清除
+sudo -E apt-get clean
 
-    - name: Setup Payload Dumper
+    - name: Clone the tools source code
       run: |
-        mkdir -p ~/payload_dumper_go
-        wget -O payload_dumper_go.tar.gz $PAYLOAD_DUMPER_URL
-        tar -C ~/payload_dumper_go/ -zxvf payload_dumper_go.tar.gz
-        chmod +x ~/payload_dumper_go/payload-dumper-go
-
-    - name: Download ROM
-      run: |
-        wget -O ~/rom.zip ${{ github.event.inputs.ROM_URL }}
-
-    - name: Extract ROM
-      run: |
-        unzip ~/rom.zip -d ~/payload_dumper_go/
-        # 验证 payload.bin 存在性
-        test -f ~/payload_dumper_go/payload.bin || (echo "payload.bin not found!" && exit 1)
-
-    - name: Extract Partitions
-      run: |
-        ~/payload_dumper_go/payload-dumper-go \
-          -o ~/payload_dumper_go \
-          -p ${{ github.event.inputs.PARTITIONS }} \
-          ~/payload_dumper_go/payload.bin
-
-    - name: Upload Artifact
-      if: github.event.inputs.UPLOAD_CONFIG == 'true'
-      uses: actions/upload-artifact@v4  # 关键升级到 v4
-      with:
-        name: Image-files
-        path: ~/payload_dumper_go/*.img
-        retention-days: 3  # 避免存储溢出
-
-    - name: Upload to WeTransfer
-      if: github.event.inputs.UPLOAD_CONFIG == 'false'
-      run: |
-        curl -sL https://git.io/file-transfer | sh
-        ./transfer wet ~/payload_dumper_go/*.img
+    - 姓名: -名称:克隆工具源代码
+运行: |
+       cd ~
+       git clone https://github.com/vm03/payload_dumper.git
+       
