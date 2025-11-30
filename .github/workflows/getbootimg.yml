@@ -2,24 +2,23 @@ name: get_images_from_payload.bin
 
 on:
   workflow_dispatch:
-      inputs:
-        UPLOAD_CONFIG:
-          description: 'Upload Artifacts to Actions'
-          required: true
-          default: "false"
-          type: boolean
-        ROM_URL:
-          description: 'ROM directly link'
-          required: true
-          default: "https://ultimateota.d.miui.com/OS2.0.206.0.VLFCNXM/diting-ota_full-OS2.0.206.0.VLFCNXM-user-15.0-ffb9d90a59.zip?t=1764465831&s=6cb61215b740756331758beb4f6a5b3a"
-          type: string
-        PARTITIONS:
-          description: 'Partitions which you need to extract(Such as boot,vendor_dlkm,...,vendor_boot)'
-          required: true
-          default: "boot"
-          type: string
-        
-    
+    inputs:
+      UPLOAD_CONFIG:
+        description: 'Upload Artifacts to Actions'
+        required: true
+        default: "false"
+        type: boolean
+      ROM_URL:
+        description: 'ROM direct link'
+        required: true
+        default: "https://ultimateota.d.miui.com/OS2.0.206.0.VLFCNXM/diting-ota_full-OS2.0.206.0.VLFCNXM-user-15.0-ffb9d90a59.zip?t=1764465831&s=6cb61215b740756331758beb4f6a5b3a"
+        type: string
+      PARTITIONS:
+        description: 'Partitions to extract (e.g., boot,vendor_dlkm,vendor_boot)'
+        required: true
+        default: "boot"
+        type: string
+
 env:
   TZ: Asia/Shanghai
   Payload_Dumper_Go_Url: https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
@@ -27,54 +26,58 @@ env:
 jobs:
   make:
     runs-on: ubuntu-latest
-
     steps:
-
       - name: Clean Up Disk Space
         run: |
-          IMAGES=$(docker images -q)
-          if [ -n "$IMAGES" ]; then
-            echo "Removing Docker images: $IMAGES"
-            docker rmi $IMAGES
-          else
-            echo "No Docker images found."
+          docker images -q | xargs -r docker rmi
+
+      - name: Setup workspace
+        run: |
+          mkdir -p "$HOME/payload_dumper_go"
+
+      - name: Download and extract payload-dumper-go
+        run: |
+          cd "$HOME"
+          wget -O payload_dumper_go.tar.gz "$Payload_Dumper_Go_Url"
+          tar -zxvf payload_dumper_go.tar.gz -C payload_dumper_go --strip-components=1
+          chmod +x payload_dumper_go/payload-dumper-go
+
+      - name: Download ROM
+        run: |
+          cd "$HOME"
+          wget -O rom.zip "${{ github.event.inputs.ROM_URL }}"
+
+      - name: Extract ROM
+        run: |
+          cd "$HOME"
+          unzip -q rom.zip -d rom_extracted
+          # Find payload.bin wherever it is
+          find rom_extracted -name "payload.bin" -exec cp {} payload_dumper_go/ \;
+
+      - name: Extract partitions
+        run: |
+          cd "$HOME/payload_dumper_go"
+          ./payload-dumper-go -o "$HOME/payload_dumper_go" -p "${{ github.event.inputs.PARTITIONS }}" payload.bin
+
+      - name: List extracted images
+        run: ls -lh "$HOME/payload_dumper_go"/*.img
+
+      - name: Upload Artifact (GitHub)
+        if: ${{ github.event.inputs.UPLOAD_CONFIG == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image-files
+          path: ${{ runner.home }}/payload_dumper_go/*.img
+
+      - name: Upload via WeTransfer
+        if: ${{ github.event.inputs.UPLOAD_CONFIG == 'false' }}
+        run: |
+          cd "$HOME"
+          curl -sL https://git.io/file-transfer | sh
+          shopt -s nullglob
+          files=("$HOME/payload_dumper_go"/*.img)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "❌ No .img files extracted!"
+            exit 1
           fi
-        
-    - name: Clone the tools source code
-      run: |
-       cd ~
-       mkdir -p ~/payload_dumper_go
-       wget -O payload_dumper_go.tar.gz $Payload_Dumper_Go_Url
-       tar -C ~/payload_dumper_go/ -zxvf payload_dumper_go.tar.gz
-       
-  
-    - name: Download the ROM
-      run: |
-       cd ~
-       wget -O rom.zip ${{ github.event.inputs.ROM_URL }}
-   
-    - name: unzip the ROM
-      run: |
-       cd ~
-       unzip rom.zip -d payload_dumper_go
-    
-    - name: extract the payload.bin
-      run: |
-       cd ~
-       cd payload_dumper_go
-       ./payload-dumper-go -o ~/payload_dumper_go -p ${{ github.event.inputs.PARTITIONS }} payload.bin
-   
-    - name: Upload Artifact
-      if: github.event.inputs.UPLOAD_CONFIG == 'true'
-      uses: actions/upload-artifact@v4
-      with:
-        name: Image-files
-        path: |
-          ~/payload_dumper_go/*.img
-          
-    - name: Upload images to WeTransfer
-      if: github.event.inputs.UPLOAD_CONFIG == 'false'
-      run: |
-        cd ~
-        curl -sL https://git.io/file-transfer | sh
-        ./transfer wet ~/payload_dumper_go/*.img
+          ./transfer wet "${files[@]}"
