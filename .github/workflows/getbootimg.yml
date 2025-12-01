@@ -1,5 +1,4 @@
 name: get_images_from_payload.bin
-
 on:
   workflow_dispatch:
     inputs:
@@ -31,20 +30,23 @@ jobs:
         run: |
           docker images -q | xargs -r docker rmi || echo "No Docker images to remove."
 
+      - name: Install jq (for tmpfiles.org JSON parsing)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
       - name: Create working directory
         run: mkdir -p "$HOME/work"
 
       - name: Download payload-dumper-go
         run: |
           cd "$HOME/work"
-          wget -O payload_dumper_go.tar.gz "$Payload_Dumper_Go_Url"
+          wget --connect-timeout=10 --timeout=30 -O payload_dumper_go.tar.gz "$Payload_Dumper_Go_Url"
 
-      - name: Extract payload-dumper-go (no strip-components!)
+      - name: Extract payload-dumper-go
         run: |
           cd "$HOME/work"
           mkdir -p payload_dumper_go
           tar -xzf payload_dumper_go.tar.gz -C payload_dumper_go
-          ls -l payload_dumper_go/  # Debug: show extracted file
+          ls -l payload_dumper_go/
 
       - name: Verify and make executable
         run: |
@@ -59,14 +61,14 @@ jobs:
       - name: Download ROM
         run: |
           cd "$HOME/work"
-          wget -O rom.zip "${{ github.event.inputs.ROM_URL }}"
+          echo "📥 Downloading ROM from: ${{ github.event.inputs.ROM_URL }}"
+          wget --connect-timeout=10 --timeout=120 -O rom.zip "${{ github.event.inputs.ROM_URL }}"
 
       - name: Extract ROM and locate payload.bin
         run: |
           cd "$HOME/work"
           mkdir -p rom_extracted
           unzip -q rom.zip -d rom_extracted
-          # Find and copy payload.bin to payload_dumper_go/
           find rom_extracted -type f -name "payload.bin" -exec cp {} payload_dumper_go/ \;
           if [ ! -f payload_dumper_go/payload.bin ]; then
             echo "❌ ERROR: payload.bin not found in the ROM!"
@@ -83,12 +85,26 @@ jobs:
       - name: Extract specified partitions
         run: |
           cd "$HOME/work/payload_dumper_go"
-          ./payload-dumper-go -o "$HOME/work/payload_dumper_go" -p "${{ github.event.inputs.PARTITIONS }}" payload.bin
+          partitions="${{ github.event.inputs.PARTITIONS }}"
+          args=()
+          IFS=',' read -ra PARTS <<< "$partitions"
+          for part in "${PARTS[@]}"; do
+            part=$(echo "$part" | xargs)  # Trim whitespace
+            if [ -n "$part" ]; then
+              args+=("-p" "$part")
+            fi
+          done
+          if [ ${#args[@]} -eq 0 ]; then
+            echo "❌ No valid partitions specified."
+            exit 1
+          fi
+          echo "🔧 Extracting partitions: ${args[*]}"
+          ./payload-dumper-go -o "$HOME/work/payload_dumper_go" "${args[@]}" payload.bin
 
       - name: List extracted images
         run: |
           cd "$HOME/work/payload_dumper_go"
-          ls -lh *.img || echo "⚠️ No .img files were extracted."
+          ls -lh *.img || { echo "⚠️ No .img files were extracted."; exit 1; }
 
       - name: Upload Artifact to GitHub
         if: ${{ github.event.inputs.UPLOAD_CONFIG == 'true' }}
@@ -97,18 +113,78 @@ jobs:
           name: Extracted-Images
           path: ${{ runner.home }}/work/payload_dumper_go/*.img
 
-      - name: Upload via transfer.sh (reliable alternative to WeTransfer)
+      - name: Upload via Multiple Services (fallback chain)
         if: ${{ github.event.inputs.UPLOAD_CONFIG == 'false' }}
         run: |
           cd "$HOME/work"
           shopt -s nullglob
           img_files=(payload_dumper_go/*.img)
+          
           if [ ${#img_files[@]} -eq 0 ]; then
             echo "❌ No .img files to upload."
             exit 1
           fi
-          echo "📤 Uploading extracted image(s) to transfer.sh..."
+
+          echo "📤 Starting multi-service upload for ${#img_files[@]} file(s)..."
+
+          upload_services=("transfer.sh" "0x0.st" "tmpfiles.org")
+
           for f in "${img_files[@]}"; do
-            url=$(curl --upload-file "$f" "https://transfer.sh/$(basename "$f")")
-            echo "🔗 $(basename "$f"): $url"
+            filename=$(basename "$f")
+            echo "➡️ Processing: $filename"
+            uploaded=false
+            retry=0
+            max_retries=3
+
+            while [ $retry -lt $max_retries ] && [ "$uploaded" = false ]; do
+              for service in "${upload_services[@]}"; do
+                case "$service" in
+                  "transfer.sh")
+                    echo "  → Trying transfer.sh..."
+                    url=$(curl --connect-timeout 10 --max-time 60 --upload-file "$f" "https://transfer.sh/$filename" 2>/dev/null)
+                    if [ $? -eq 0 ] && [ -n "$url" ]; then
+                      echo "  ✅ Success (transfer.sh): $url"
+                      uploaded=true
+                      break
+                    fi
+                    ;;
+
+                  "0x0.st")
+                    echo "  → Trying 0x0.st..."
+                    url=$(curl --connect-timeout 10 --max-time 60 --upload-file "$f" "https://0x0.st" 2>/dev/null)
+                    if [ $? -eq 0 ] && [ -n "$url" ]; then
+                      echo "  ✅ Success (0x0.st): $url"
+                      uploaded=true
+                      break
+                    fi
+                    ;;
+
+                  "tmpfiles.org")
+                    echo "  → Trying tmpfiles.org..."
+                    response=$(curl --connect-timeout 10 --max-time 60 -F "file=@$f" "https://tmpfiles.org/api/v1/upload" 2>/dev/null)
+                    if [ $? -eq 0 ]; then
+                      url=$(echo "$response" | jq -r '.data.url // empty')
+                      if [ -n "$url" ]; then
+                        echo "  ✅ Success (tmpfiles.org): $url"
+                        uploaded=true
+                        break
+                      fi
+                    fi
+                    ;;
+                esac
+              done
+
+              if [ "$uploaded" = false ]; then
+                ((retry++))
+                echo "  ⚠️ All services failed. Retry $retry/$max_retries..."
+                sleep 3
+              fi
+            done
+
+            if [ "$uploaded" = false ]; then
+              echo "❌ Failed to upload $filename after $max_retries attempts."
+              exit 1
+            fi
           done
+
+          echo "🎉 All files uploaded successfully!"
