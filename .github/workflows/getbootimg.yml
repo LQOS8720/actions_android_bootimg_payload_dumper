@@ -20,23 +20,20 @@ on:
 
 env:
   TZ: Asia/Shanghai
-  Payload_Dumper_Go_Url: https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz
+  # 使用 WOA-Project 维护的 v1.3.0 版本，支持 HyperOS / MIUI 14+
+  Payload_Dumper_Go_Url: https://github.com/WOA-Project/payload-dumper-go/releases/download/v1.3.0/payload-dumper-go_v1.3.0_linux_amd64.tar.gz
 
 permissions:
-  contents: write  # 必须！用于创建 Release
+  contents: write  # 必须！用于创建 GitHub Release
 
 jobs:
   make:
     runs-on: ubuntu-latest
     steps:
-      - name: Clean Up Disk Space
-        run: |
-          docker images -q | xargs -r docker rmi || echo "No Docker images to remove."
-
       - name: Create working directory
         run: mkdir -p "$HOME/work"
 
-      - name: Download payload-dumper-go
+      - name: Download payload-dumper-go (v1.3.0, HyperOS compatible)
         run: |
           cd "$HOME/work"
           wget --connect-timeout=10 --timeout=30 -O payload_dumper_go.tar.gz "$Payload_Dumper_Go_Url"
@@ -45,21 +42,18 @@ jobs:
         run: |
           cd "$HOME/work"
           mkdir -p payload_dumper_go
-          tar -xzf payload_dumper_go.tar.gz -C payload_dumper_go
-
-      - name: Verify and make executable
-        run: |
-          cd "$HOME/work"
-          if [ ! -f payload_dumper_go/payload-dumper-go ]; then
-            echo "❌ ERROR: payload-dumper-go not found!"
-            exit 1
-          fi
+          tar -xzf payload_dumper_go.tar.gz -C payload_dumper_go --strip-components=1
           chmod +x payload_dumper_go/payload-dumper-go
+
+      - name: Verify payload-dumper-go
+        run: |
+          cd "$HOME/work/payload_dumper_go"
+          ./payload-dumper-go --help
 
       - name: Download ROM
         run: |
           cd "$HOME/work"
-          echo "📥 Downloading ROM..."
+          echo "📥 Downloading ROM from: ${{ github.event.inputs.ROM_URL }}"
           wget --connect-timeout=10 --timeout=120 -O rom.zip "${{ github.event.inputs.ROM_URL }}"
 
       - name: Extract ROM and locate payload.bin
@@ -69,33 +63,65 @@ jobs:
           unzip -q rom.zip -d rom_extracted
           find rom_extracted -type f -name "payload.bin" -exec cp {} payload_dumper_go/ \;
           if [ ! -f payload_dumper_go/payload.bin ]; then
-            echo "❌ payload.bin not found!"
+            echo "❌ ERROR: payload.bin not found!"
             find rom_extracted -type f | head -n 30
             exit 1
           fi
+          echo "✅ payload.bin copied."
 
-      - name: List partitions (debug)
+      - name: List partitions in payload.bin (debug)
         run: |
           cd "$HOME/work/payload_dumper_go"
+          echo "🔍 Available partitions:"
           ./payload-dumper-go -l payload.bin
 
-      - name: Extract specified partitions
+      - name: Extract specified partitions (with verbose output)
         run: |
           cd "$HOME/work/payload_dumper_go"
           partitions="${{ github.event.inputs.PARTITIONS }}"
+          
+          # 构建参数：支持多个分区，自动 trim 空格
           args=()
           IFS=',' read -ra PARTS <<< "$partitions"
           for part in "${PARTS[@]}"; do
             part=$(echo "$part" | xargs)
-            [ -n "$part" ] && args+=("-p" "$part")
+            if [ -n "$part" ]; then
+              args+=("-p" "$part")
+            fi
           done
-          [ ${#args[@]} -eq 0 ] && { echo "❌ No valid partitions."; exit 1; }
-          ./payload-dumper-go -o "$HOME/work/payload_dumper_go" "${args[@]}" payload.bin
+          
+          if [ ${#args[@]} -eq 0 ]; then
+            echo "❌ No valid partitions specified."
+            exit 1
+          fi
+          
+          echo "🔧 Extracting partitions: ${args[*]}"
+          # 启用 verbose 模式 (-v) 以查看详细过程
+          ./payload-dumper-go -v -o . "${args[@]}" payload.bin
 
-      - name: List extracted images
+      - name: List all files after extraction (diagnostic)
         run: |
           cd "$HOME/work/payload_dumper_go"
-          ls -lh *.img || { echo "⚠️ No .img files extracted."; exit 1; }
+          echo "📁 Files in extraction directory:"
+          ls -la
+          echo ""
+          echo "🔍 Looking for .img files:"
+          ls *.img 2>/dev/null || echo "❌ No .img files found!"
+
+      - name: Fail if no .img files were extracted
+        run: |
+          cd "$HOME/work/payload_dumper_go"
+          shopt -s nullglob
+          img_files=(*.img)
+          if [ ${#img_files[@]} -eq 0 ]; then
+            echo "🔴 Extraction completed but no .img files generated. Check ROM compatibility."
+            exit 1
+          else
+            echo "🟢 Found ${#img_files[@]} image(s):"
+            for f in "${img_files[@]}"; do
+              echo "   - $f ($(stat -c%s "$f") bytes)"
+            done
+          fi
 
       - name: Upload to GitHub Artifacts (for debugging)
         if: ${{ github.event.inputs.UPLOAD_CONFIG == 'true' }}
@@ -113,7 +139,7 @@ jobs:
           body: |
             Partitions: `${{ github.event.inputs.PARTITIONS }}`
             Source ROM: `${{ github.event.inputs.ROM_URL }}`
-            Workflow run: [View logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            Workflow: [View logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
           draft: false
           prerelease: false
           files: ${{ runner.home }}/work/payload_dumper_go/*.img
