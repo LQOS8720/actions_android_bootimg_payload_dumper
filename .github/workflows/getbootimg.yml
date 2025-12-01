@@ -1,4 +1,4 @@
-name: get_images_from_payload.bin
+name: get_images_from_payload.bin (Python version)
 on:
   workflow_dispatch:
     inputs:
@@ -13,111 +13,62 @@ on:
         default: "https://ultimateota.d.miui.com/OS2.0.206.0.VLFCNXM/diting-ota_full-OS2.0.206.0.VLFCNXM-user-15.0-ffb9d90a59.zip?t=1764465831&s=6cb61215b740756331758beb4f6a5b3a"
         type: string
       PARTITIONS:
-        description: 'Partitions to extract (e.g., boot,vendor_dlkm,vendor_boot)'
+        description: 'Partitions to extract (e.g., boot,vendor_boot,dtbo)'
         required: true
         default: "boot"
         type: string
 
 env:
   TZ: Asia/Shanghai
-  # 使用 WOA-Project 维护的 v1.3.0 版本，支持 HyperOS / MIUI 14+
-  Payload_Dumper_Go_Url: https://github.com/WOA-Project/payload-dumper-go/releases/download/v1.3.0/payload-dumper-go_v1.3.0_linux_amd64.tar.gz
 
 permissions:
-  contents: write  # 必须！用于创建 GitHub Release
+  contents: write
 
 jobs:
   make:
     runs-on: ubuntu-latest
     steps:
-      - name: Create working directory
-        run: mkdir -p "$HOME/work"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-      - name: Download payload-dumper-go (v1.3.0, HyperOS compatible)
+      - name: Install payload-dumper (Python version)
         run: |
-          cd "$HOME/work"
-          wget --connect-timeout=10 --timeout=30 -O payload_dumper_go.tar.gz "$Payload_Dumper_Go_Url"
+          pip install --no-cache-dir git+https://github.com/5ec1cff/payload-dumper
 
-      - name: Extract payload-dumper-go
-        run: |
-          cd "$HOME/work"
-          mkdir -p payload_dumper_go
-          tar -xzf payload_dumper_go.tar.gz -C payload_dumper_go --strip-components=1
-          chmod +x payload_dumper_go/payload-dumper-go
+      - name: Create output directory
+        run: mkdir -p extracted_images
 
-      - name: Verify payload-dumper-go
+      - name: Download ROM (if needed for local extraction)
+        # 注意：payload-dumper 可直接从 URL 提取，但为兼容性，我们仍下载
         run: |
-          cd "$HOME/work/payload_dumper_go"
-          ./payload-dumper-go --help
-
-      - name: Download ROM
-        run: |
-          cd "$HOME/work"
-          echo "📥 Downloading ROM from: ${{ github.event.inputs.ROM_URL }}"
+          echo "📥 Downloading ROM..."
           wget --connect-timeout=10 --timeout=120 -O rom.zip "${{ github.event.inputs.ROM_URL }}"
 
-      - name: Extract ROM and locate payload.bin
+      - name: List available partitions (debug)
         run: |
-          cd "$HOME/work"
-          mkdir -p rom_extracted
-          unzip -q rom.zip -d rom_extracted
-          find rom_extracted -type f -name "payload.bin" -exec cp {} payload_dumper_go/ \;
-          if [ ! -f payload_dumper_go/payload.bin ]; then
-            echo "❌ ERROR: payload.bin not found!"
-            find rom_extracted -type f | head -n 30
-            exit 1
-          fi
-          echo "✅ payload.bin copied."
+          echo "🔍 Listing partitions in ROM..."
+          payload_dumper --list rom.zip
 
-      - name: List partitions in payload.bin (debug)
+      - name: Extract specified partitions
         run: |
-          cd "$HOME/work/payload_dumper_go"
-          echo "🔍 Available partitions:"
-          ./payload-dumper-go -l payload.bin
-
-      - name: Extract specified partitions (with verbose output)
-        run: |
-          cd "$HOME/work/payload_dumper_go"
+          cd extracted_images
           partitions="${{ github.event.inputs.PARTITIONS }}"
-          
-          # 构建参数：支持多个分区，自动 trim 空格
-          args=()
-          IFS=',' read -ra PARTS <<< "$partitions"
-          for part in "${PARTS[@]}"; do
-            part=$(echo "$part" | xargs)
-            if [ -n "$part" ]; then
-              args+=("-p" "$part")
-            fi
-          done
-          
-          if [ ${#args[@]} -eq 0 ]; then
-            echo "❌ No valid partitions specified."
-            exit 1
-          fi
-          
-          echo "🔧 Extracting partitions: ${args[*]}"
-          # 启用 verbose 模式 (-v) 以查看详细过程
-          ./payload-dumper-go -v -o . "${args[@]}" payload.bin
+          echo "🔧 Extracting partitions: $partitions"
+          payload_dumper --partitions "$partitions" ../rom.zip
 
-      - name: List all files after extraction (diagnostic)
+      - name: Verify extracted .img files
         run: |
-          cd "$HOME/work/payload_dumper_go"
-          echo "📁 Files in extraction directory:"
+          cd extracted_images
+          echo "📁 Files extracted:"
           ls -la
-          echo ""
-          echo "🔍 Looking for .img files:"
-          ls *.img 2>/dev/null || echo "❌ No .img files found!"
-
-      - name: Fail if no .img files were extracted
-        run: |
-          cd "$HOME/work/payload_dumper_go"
-          shopt -s nullglob
           img_files=(*.img)
           if [ ${#img_files[@]} -eq 0 ]; then
-            echo "🔴 Extraction completed but no .img files generated. Check ROM compatibility."
+            echo "❌ No .img files found!"
             exit 1
           else
-            echo "🟢 Found ${#img_files[@]} image(s):"
+            echo "✅ Found ${#img_files[@]} image(s):"
             for f in "${img_files[@]}"; do
               echo "   - $f ($(stat -c%s "$f") bytes)"
             done
@@ -128,7 +79,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Extracted-Images
-          path: ${{ runner.home }}/work/payload_dumper_go/*.img
+          path: extracted_images/*.img
 
       - name: Create GitHub Release and Upload Images
         if: ${{ github.event.inputs.UPLOAD_CONFIG == 'false' }}
@@ -139,7 +90,8 @@ jobs:
           body: |
             Partitions: `${{ github.event.inputs.PARTITIONS }}`
             Source ROM: `${{ github.event.inputs.ROM_URL }}`
+            Tool: `5ec1cff/payload-dumper (Python)`
             Workflow: [View logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
           draft: false
           prerelease: false
-          files: ${{ runner.home }}/work/payload_dumper_go/*.img
+          files: extracted_images/*.img
